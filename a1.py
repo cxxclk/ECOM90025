@@ -5,8 +5,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.model_selection import train_test_split
 
-#load \data\train.csv
-train_data = pd.read_csv('Data/train_data.csv')
+#load https://github.com/cxxclk/ECOM90025/blob/main/Data/train_data.csv
+train_data = pd.read_csv('https://raw.githubusercontent.com/cxxclk/ECOM90025/main/Data/train_data.csv')
 
 # Display the first few rows of the training data
 print(train_data.head())
@@ -114,4 +114,5 @@ submission = pd.DataFrame({
     'ID': test_ID,
     'Y': test_predictions
 })
+
 submission.to_csv('Data/submission.csv', index=False)
