@@ -102,7 +102,7 @@ for i in range(5):
 
 
 # Predict on the test set
-test_data = pd.read_csv('Data/test_data.csv')
+test_data = pd.read_csv('https://raw.githubusercontent.com/cxxclk/ECOM90025/main/Data/test_data.csv')
 test_ID = test_data['ID'].copy()  # Save ID column before dropping
 test_data = test_data.drop(columns=['ID'])
 test_X = test_data[top_features]
@@ -115,4 +115,5 @@ submission = pd.DataFrame({
     'Y': test_predictions
 })
 
-submission.to_csv('Data/submission.csv', index=False)
+submission.to_csv('submission.csv', index=False)
+
