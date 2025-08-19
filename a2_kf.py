@@ -9,6 +9,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.linear_model import ElasticNetCV
 from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score
 
 # load from github
 train_data = pd.read_csv('https://raw.githubusercontent.com/cxxclk/ECOM90025/main/Data/train_data.csv')
@@ -100,160 +101,176 @@ for feature, improvement in significant_improvements:
 for feature, _ in significant_improvements:
     X[f'{feature}_squared'] = X[feature] ** 2
 
-# Get top 5 correlated features (excluding Y)
-top5_features = sorted_correlation.head(5).index.tolist()
-print(f"\nTop 5 correlated features: {top5_features}")
+# Interaction selection
+# residuals screening
+# Get top 30 correlated features
+top_30_features = sorted_correlation.head(30).index.tolist()
+print(f"\nTop 30 correlated features: {top_30_features}")
 
-# Add interaction terms for top 5 correlated features
-print("\nAdding interaction terms for top 5 correlated features...")
-interaction_count = 0
-for i in range(len(top5_features)):
-    for j in range(i+1, len(top5_features)):
-        feature1 = top5_features[i]
-        feature2 = top5_features[j]
-        interaction_name = f'{feature1}_{feature2}_interaction'
-        X[interaction_name] = X[feature1] * X[feature2]
-        interaction_count += 1
-        print(f"Added: {interaction_name}")
+# Train a baseline model to get residuals
+X_baseline = X[top_30_features + [f'{feature}_squared' for feature, _ in significant_improvements if feature in top_30_features]]
+X_train_base, X_test_base, y_train_base, y_test_base = train_test_split(X_baseline, y, test_size=0.2, random_state=42)
 
-print(f"\nTotal interaction terms added: {interaction_count}")
-print(f"Final feature count: {X.shape[1]}")
+baseline_pipeline = make_pipeline(StandardScaler(), ElasticNetCV(cv=5, random_state=42))
+baseline_pipeline.fit(X_train_base, y_train_base)
+y_pred_baseline = baseline_pipeline.predict(X_train_base)
+residuals = y_train_base - y_pred_baseline
 
-# Split train and validation sets after feature engineering
-X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
+print(f"\nComparing original correlation vs residual correlation for interaction terms:")
+print("-" * 80)
+print(f"{'Interaction':25s} | {'Original Corr':12s} | {'Residual Corr':12s} | {'Difference':10s}")
+print("-" * 80)
 
-# Elastic Net CV with forward selection approach on split data
-print("\n" + "="*60)
-print("ELASTIC NET CV WITH FORWARD SELECTION")
-print("="*60)
+interaction_comparisons = []
 
-# Initialize variables for forward selection
-selected_features = []
-remaining_features = list(X.columns)
-best_overall_score = float('inf')
-feature_scores = []
-
-print(f"Starting forward selection with {len(remaining_features)} features...")
-
-# Forward selection loop
-for step in range(min(30, len(remaining_features))):  # Limit to 30 features max
-    best_feature = None
-    best_score = float('inf')
-    
-    print(f"\nStep {step + 1}: Testing {len(remaining_features)} remaining features...")
-    
-    # Test each remaining feature
-    for feature in remaining_features:
-        current_features = selected_features + [feature]
-        X_current = X_train[current_features]
+# Generate interaction terms between top 30 features
+for i in range(len(top_30_features)):
+    for j in range(i+1, len(top_30_features)):
+        feature1 = top_30_features[i]
+        feature2 = top_30_features[j]
         
-        # Cross-validation with current feature set
-        cv_scores = []
-        for train_idx, val_idx in kf.split(X_current):
-            X_train_fold = X_current.iloc[train_idx]
-            X_val_fold = X_current.iloc[val_idx]
-            y_train_fold = y_train.iloc[train_idx]
-            y_val_fold = y_train.iloc[val_idx]
-            
-            # Fit ElasticNet with CV
-            pipeline = make_pipeline(StandardScaler(), ElasticNetCV(cv=3, random_state=42))
-            pipeline.fit(X_train_fold, y_train_fold)
-            y_pred = pipeline.predict(X_val_fold)
-            cv_scores.append(np.sqrt(mean_squared_error(y_val_fold, y_pred)))
+        # Create interaction term
+        interaction_term = X_train_base[feature1] * X_train_base[feature2]
+        interaction_name = f"{feature1}*{feature2}"
         
-        mean_score = np.mean(cv_scores)
+        # Original correlation with y
+        original_corr = np.corrcoef(interaction_term, y_train_base)[0, 1]
         
-        if mean_score < best_score:
-            best_score = mean_score
-            best_feature = feature
-    
-    # Check if adding this feature improves the model
-    if best_score < best_overall_score:
-        selected_features.append(best_feature)
-        remaining_features.remove(best_feature)
-        best_overall_score = best_score
-        feature_scores.append((best_feature, best_score))
-        print(f"  → Added '{best_feature}' | RMSE: {best_score:.4f}")
-    else:
-        print(f"  → No improvement found. Stopping selection.")
-        break
+        # Residual correlation
+        residual_corr = np.corrcoef(interaction_term, residuals)[0, 1]
+        
+        difference = abs(residual_corr) - abs(original_corr)
+        
+        interaction_comparisons.append({
+            'interaction': interaction_name,
+            'original_corr': original_corr,
+            'residual_corr': residual_corr,
+            'difference': difference
+        })
+        
+        print(f"{interaction_name:25s} | {original_corr:11.4f} | {residual_corr:11.4f} | {difference:9.4f}")
 
-print(f"\nForward Selection Complete!")
-print(f"Selected {len(selected_features)} features")
-print(f"Final RMSE: {best_overall_score:.4f}")
+# Sort by residual correlation strength
+interaction_comparisons.sort(key=lambda x: abs(x['residual_corr']), reverse=True)
 
-print("\nSelected features in order:")
-for i, (feature, score) in enumerate(feature_scores):
-    print(f"{i+1:2d}. {feature:30s} | RMSE: {score:.4f}")
+print(f"\nTop 10 interaction terms by residual correlation strength:")
+print("-" * 60)
+for i in range(min(10, len(interaction_comparisons))):
+    comp = interaction_comparisons[i]
+    print(f"{comp['interaction']:25s} |Original Corr:{comp['original_corr']:11.4f} | Residual Corr: {comp['residual_corr']:7.4f} | Difference: {comp['difference']:9.4f}")
 
-# Final model with selected features - Train on full dataset to get final parameters
-X_final = X[selected_features]
-final_pipeline = make_pipeline(StandardScaler(), ElasticNetCV(cv=5, random_state=42))
-final_pipeline.fit(X_final, y)
+# Interactions with residual corr > 0.1 and positive diff
+print(f"\nInteractions with Residual Corr > 0.1 and Positive Difference:")
+print("-" * 60)
+for comp in interaction_comparisons:
+    if comp['residual_corr'] > 0.1 and comp['difference'] > 0:
+        print(f"{comp['interaction']:25s} |Original Corr:{comp['original_corr']:11.4f} | Residual Corr: {comp['residual_corr']:7.4f} | Difference: {comp['difference']:9.4f}")
 
-# Extract the ElasticNetCV model to get parameters
-elastic_net_model = final_pipeline.named_steps['elasticnetcv']
-final_alpha = elastic_net_model.alpha_
-final_l1_ratio = elastic_net_model.l1_ratio_
+# add selected interaction terms to columns
+interaction_terms = [comp['interaction'] for comp in interaction_comparisons if comp['residual_corr'] > 0.1 and comp['difference'] > 0]
+for term in interaction_terms:
+    X[term] = X[term.split('*')[0]] * X[term.split('*')[1]]
 
-print(f"Final Model Parameters:")
-print(f"Alpha: {final_alpha:.6f}")
-print(f"L1 Ratio: {final_l1_ratio:.6f}")
-print(f"\n" + "="*60)
-print("FINAL MODEL EVALUATION")
-print("="*60)
+# Elastic Net CV
+# Elastic Net CV for feature selection
+print(f"\nElastic Net CV for feature selection:")
+print("-" * 50)
 
-X_final = X[selected_features]
-final_cv_scores = []
+# Prepare final feature set
+X_final = X.copy()
+y_final = y.copy()
 
-for train_idx, val_idx in kf.split(X_final):
-    X_train_fold = X_final.iloc[train_idx]
-    X_val_fold = X_final.iloc[val_idx]
-    y_train_fold = y.iloc[train_idx]
-    y_val_fold = y.iloc[val_idx]
-    
-    final_pipeline = make_pipeline(StandardScaler(), ElasticNetCV(cv=3, random_state=42))
-    final_pipeline.fit(X_train_fold, y_train_fold)
-    y_pred = final_pipeline.predict(X_val_fold)
-    final_cv_scores.append(np.sqrt(mean_squared_error(y_val_fold, y_pred)))
+# Split data
+X_train_final, X_test_final, y_train_final, y_test_final = train_test_split(
+    X_final, y_final, test_size=0.2, random_state=42
+)
 
-final_mean_rmse = np.mean(final_cv_scores)
-final_std_rmse = np.std(final_cv_scores)
+# Create Elastic Net pipeline with cross-validation
+elastic_net_pipeline = make_pipeline(
+    StandardScaler(), 
+    ElasticNetCV(
+        l1_ratio=[0.1, 0.5, 0.7, 0.9, 0.95, 0.99, 1.0],
+        alphas=np.logspace(-4, 1, 50),
+        cv=5,
+        random_state=42,
+        max_iter=2000
+    )
+)
 
-print(f"Final Model Performance:")
-print(f"Mean RMSE: {final_mean_rmse:.4f} ± {final_std_rmse:.4f}")
-print(f"Selected Features: {selected_features}")
+# Fit the model
+elastic_net_pipeline.fit(X_train_final, y_train_final)
 
-# Validate on validation set
-X_val_selected = X_val[selected_features]
-y_pred_val = final_pipeline.predict(X_val_selected)
-val_rmse = np.sqrt(mean_squared_error(y_val, y_pred_val))
-print(f"Validation RMSE: {val_rmse:.4f}")
+# Get the trained ElasticNetCV model
+elastic_net_model = elastic_net_pipeline.named_steps['elasticnetcv']
 
-# Test on test set
+# Print optimal parameters
+print(f"Best alpha: {elastic_net_model.alpha_:.6f}")
+print(f"Best l1_ratio: {elastic_net_model.l1_ratio_:.3f}")
+
+# Get feature coefficients
+feature_names = X_final.columns
+coefficients = elastic_net_model.coef_
+
+# Create feature importance dataframe
+feature_importance = pd.DataFrame({
+    'feature': feature_names,
+    'coefficient': coefficients,
+    'abs_coefficient': np.abs(coefficients)
+}).sort_values('abs_coefficient', ascending=False)
+
+# Display selected features (non-zero coefficients)
+selected_features = feature_importance[feature_importance['abs_coefficient'] > 0]
+print(f"\nSelected features ({len(selected_features)} out of {len(feature_names)}):")
+print("-" * 60)
+for _, row in selected_features.iterrows():
+    print(f"{row['feature']:25s} | Coefficient: {row['coefficient']:8.4f}")
+
+# Model performance
+y_pred_train = elastic_net_pipeline.predict(X_train_final)
+y_pred_test = elastic_net_pipeline.predict(X_test_final)
+
+train_rmse = np.sqrt(mean_squared_error(y_train_final, y_pred_train))
+test_rmse = np.sqrt(mean_squared_error(y_test_final, y_pred_test))
+
+print(f"\nModel Performance:")
+print(f"Training RMSE: {train_rmse:.4f}")
+print(f"Testing RMSE: {test_rmse:.4f}")
+print(f"Number of selected features: {len(selected_features)}")
+print(f"Final alpha: {elastic_net_model.alpha_:.6f}")
+print(f"Final l1_ratio: {elastic_net_model.l1_ratio_:.3f}")
+# Calculate R^2 for training and testing sets
+train_r2 = r2_score(y_train_final, y_pred_train)
+test_r2 = r2_score(y_test_final, y_pred_test)
+
+print(f"\nModel R^2 Scores:")
+print(f"Training R^2: {train_r2:.4f}")
+print(f"Testing R^2: {test_r2:.4f}")
+
+# Test on testset
 test_df = pd.read_csv('https://raw.githubusercontent.com/cxxclk/ECOM90025/main/Data/test_data.csv')
 test_ID = test_df['ID']
 
-# Drop ID column and recreate engineered features for test data
 X_test = test_df.drop(columns=['ID'])
-
-# Add quadratic terms for features with significant improvements
+# Add quadratic terms that were selected during training
 for feature, _ in significant_improvements:
     X_test[f'{feature}_squared'] = X_test[feature] ** 2
 
-# Add interaction terms for top 5 correlated features
-for i in range(len(top5_features)):
-    for j in range(i+1, len(top5_features)):
-        feature1 = top5_features[i]
-        feature2 = top5_features[j]
-        interaction_name = f'{feature1}_{feature2}_interaction'
-        X_test[interaction_name] = X_test[feature1] * X_test[feature2]
+# Add interaction terms that were selected during training
+for term in interaction_terms:
+    X_test[term] = X_test[term.split('*')[0]] * X_test[term.split('*')[1]]
 
-# Select only the features used in the final model
-X_test = X_test[selected_features]
-y_pred_test = final_pipeline.predict(X_test)
+# Make predictions using the trained model
+y_test_pred = elastic_net_pipeline.predict(X_test)
 
-# Submission
-submission = pd.DataFrame({'ID': test_ID, 'Y': y_pred_test})
+# Create submission dataframe
+submission = pd.DataFrame({
+    'ID': test_ID,
+    'Y': y_test_pred
+})
+
+# Save to CSV
 submission.to_csv('submission.csv', index=False)
-print("\nSaved: submission.csv")
+print(f"\nPredictions saved to submission.csv")
+print(f"Submission shape: {submission.shape}")
+print(f"First 5 predictions:")
+print(submission.head())
