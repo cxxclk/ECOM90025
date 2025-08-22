@@ -1,4 +1,3 @@
-
 import pandas as pd
 import numpy as np
 import warnings
@@ -148,6 +147,7 @@ print(f"\nTop 30 correlated features: {top_30_features}")
 
 X_baseline_cols = top_30_features + [f'{feature}_op2' for feature, _ in significant_improvements if feature in top_30_features]
 X_baseline = X[X_baseline_cols]
+# 保留你原来的第一次固定切分
 X_train_base, X_test_base, y_train_base, y_test_base = train_test_split(X_baseline, y, test_size=0.2, random_state=42)
 
 baseline_pipeline = make_pipeline(StandardScaler(), ElasticNetCV(cv=5, random_state=42))
@@ -209,24 +209,38 @@ print("-" * 50)
 X_final = X.copy()
 y_final = y.copy()
 
-X_train_final, X_test_final, y_train_final, y_test_final = train_test_split(
-    X_final, y_final, test_size=0.2, random_state=42
-)
+# >>> KFold CV (no holdout) start
+kf_final = KFold(n_splits=10, shuffle=True, random_state=42)
+oof_pred_final = np.zeros(len(y_final), dtype=float)
 
-elastic_net_pipeline = make_pipeline(
-    StandardScaler(), 
-    ElasticNetCV(
-        l1_ratio=[0.7, 0.8, 0.9, 0.95, 0.98, 0.99, 1.0],
-        alphas=np.logspace(-4, 1, 50),
-        cv=5,
-        random_state=42,
-        max_iter=2000
+def build_enet_pipeline():
+    return make_pipeline(
+        StandardScaler(),
+        ElasticNetCV(
+            l1_ratio=[0.7, 0.8, 0.9, 0.95, 0.98, 0.99, 1.0],
+            alphas=np.logspace(-4, 1, 50),
+            cv=5,
+            random_state=42,
+            max_iter=2000
+        )
     )
-)
 
-elastic_net_pipeline.fit(X_train_final, y_train_final)
+for tr_idx, va_idx in kf_final.split(X_final):
+    X_tr, X_va = X_final.iloc[tr_idx], X_final.iloc[va_idx]
+    y_tr = y_final.iloc[tr_idx]
+    pipe_cv = build_enet_pipeline()
+    pipe_cv.fit(X_tr, y_tr)
+    oof_pred_final[va_idx] = pipe_cv.predict(X_va)
 
+cv_rmse_final = float(np.sqrt(mean_squared_error(y_final, oof_pred_final)))
+cv_r2_final = float(r2_score(y_final, oof_pred_final))
+print(f"5-fold OOF RMSE: {cv_rmse_final:.4f}")
+print(f"5-fold OOF R^2 : {cv_r2_final:.4f}")
+
+elastic_net_pipeline = build_enet_pipeline()
+elastic_net_pipeline.fit(X_final, y_final)
 elastic_net_model = elastic_net_pipeline.named_steps['elasticnetcv']
+# >>> KFold CV (no holdout) end
 
 print(f"Best alpha: {elastic_net_model.alpha_:.6f}")
 print(f"Best l1_ratio: {elastic_net_model.l1_ratio_:.3f}")
@@ -245,23 +259,12 @@ print("-" * 60)
 for _, row in selected_features.iterrows():
     print(f"{row['feature']:25s} | Coefficient: {row['coefficient']:8.4f}")
 
-y_pred_train = elastic_net_pipeline.predict(X_train_final)
-y_pred_test = elastic_net_pipeline.predict(X_test_final)
-
-train_rmse = np.sqrt(mean_squared_error(y_train_final, y_pred_train))
-test_rmse = np.sqrt(mean_squared_error(y_test_final, y_pred_test))
-
-print(f"\nModel Performance:")
-print(f"Training RMSE: {train_rmse:.4f}")
-print(f"Testing RMSE: {test_rmse:.4f}")
+print(f"\nModel Performance (from OOF):")
+print(f"CV RMSE: {cv_rmse_final:.4f}")
+print(f"CV R^2 : {cv_r2_final:.4f}")
 print(f"Number of selected features: {len(selected_features)}")
 print(f"Final alpha: {elastic_net_model.alpha_:.6f}")
 print(f"Final l1_ratio: {elastic_net_model.l1_ratio_:.3f}")
-train_r2 = r2_score(y_train_final, y_pred_train)
-test_r2 = r2_score(y_test_final, y_pred_test)
-print(f"\nModel R^2 Scores:")
-print(f"Training R^2: {train_r2:.4f}")
-print(f"Testing R^2: {test_r2:.4f}")
 
 print(f"\nElastic Net Forward Search:")
 print("=" * 60)
@@ -306,7 +309,28 @@ for nm in (x34_op3_name, x26_op3_name) + tuple(hinge_terms):
         candidate_terms.append(nm)
 print(f"Added candidates: {x34_op3_name}, {x26_op3_name}, {', '.join(hinge_terms)}")
 
-X_candidates = X_final.copy()
+# === NEW: add interaction hinge candidates for X15*X12 and X16*X30 ===
+interaction_hinge_candidates = []
+if "X15" in X.columns and "X12" in X.columns:
+    inter_1512 = X["X15"] * X["X12"]
+    X["X15*X12_pos"] = hinge_pos(inter_1512)
+    X["X15*X12_neg"] = hinge_neg(inter_1512)
+    interaction_hinge_candidates += ["X15*X12_pos", "X15*X12_neg"]
+if "X16" in X.columns and "X30" in X.columns:
+    inter_1630 = X["X16"] * X["X30"]
+    X["X16*X30_pos"] = hinge_pos(inter_1630)
+    X["X16*X30_neg"] = hinge_neg(inter_1630)
+    interaction_hinge_candidates += ["X16*X30_pos", "X16*X30_neg"]
+
+for nm in interaction_hinge_candidates:
+    if nm not in candidate_terms:
+        candidate_terms.append(nm)
+
+# de-duplicate while preserving order
+candidate_terms = list(dict.fromkeys(candidate_terms))
+print(f"Also added interaction hinge candidates: {interaction_hinge_candidates}")
+
+X_candidates = X.copy()
 
 # OP2 terms
 for term in top_op2_terms:
@@ -327,7 +351,7 @@ if "X34" in X.columns and x34_op3_name not in X_candidates.columns:
 if "X26" in X.columns and x26_op3_name not in X_candidates.columns:
     X_candidates[x26_op3_name] = _transform_op3(X["X26"], op_params["X26"])
 
-# Hinge terms
+# Hinge terms for raw features
 if "X34" in X.columns:
     X_candidates["X34_pos"] = hinge_pos(X["X34"])
     X_candidates["X34_neg"] = hinge_neg(X["X34"])
@@ -335,22 +359,24 @@ if "X26" in X.columns:
     X_candidates["X26_pos"] = hinge_pos(X["X26"])
     X_candidates["X26_neg"] = hinge_neg(X["X26"])
 
+# Hinge terms for INTERACTIONS (X15*X12, X16*X30)
+if "X15" in X.columns and "X12" in X.columns:
+    _i = X["X15"] * X["X12"]
+    X_candidates["X15*X12_pos"] = hinge_pos(_i)
+    X_candidates["X15*X12_neg"] = hinge_neg(_i)
+if "X16" in X.columns and "X30" in X.columns:
+    _i = X["X16"] * X["X30"]
+    X_candidates["X16*X30_pos"] = hinge_pos(_i)
+    X_candidates["X16*X30_neg"] = hinge_neg(_i)
+
+
 def outer_cv_rmse(Xdf, y_series, feat_list, random_state=42, n_splits=5):
     kf_outer = KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
     rmses = []
     for tr_idx, va_idx in kf_outer.split(Xdf):
         X_tr, X_va = Xdf.iloc[tr_idx][feat_list], Xdf.iloc[va_idx][feat_list]
         y_tr, y_va = y_series.iloc[tr_idx], y_series.iloc[va_idx]
-        pipe = make_pipeline(
-            StandardScaler(),
-            ElasticNetCV(
-                l1_ratio=[0.7, 0.8, 0.9, 0.95, 0.98, 0.99, 1.0],
-                alphas=np.logspace(-4, 1, 50),
-                cv=5,
-                random_state=42,
-                max_iter=2000
-            )
-        )
+        pipe = build_enet_pipeline()
         pipe.fit(X_tr, y_tr)
         pred = pipe.predict(X_va)
         rmses.append(np.sqrt(mean_squared_error(y_va, pred)))
@@ -408,20 +434,13 @@ if len(search_results) > 0:
 # ----------------- Final model & submission -----------------
 X_final_selected = X_candidates[selected_terms].copy()
 
-final_full_pipeline = make_pipeline(
-    StandardScaler(),
-    ElasticNetCV(
-        l1_ratio=[0.7, 0.8, 0.9, 0.95, 0.98, 0.99, 1.0],
-        alphas=np.logspace(-4, 1, 50),
-        cv=5,
-        random_state=42,
-        max_iter=2000
-    )
-)
+final_full_pipeline = build_enet_pipeline()
 final_full_pipeline.fit(X_final_selected, y_final)
 
 final_cv_rmse = outer_cv_rmse(X_candidates, y_final, selected_terms, random_state=7, n_splits=5)
 print(f"\n[Final] 5-fold CV RMSE (re-eval with seed=7): {final_cv_rmse:.4f}")
+
+# ====== Test-time processing ======
 
 test_df = pd.read_csv('https://raw.githubusercontent.com/cxxclk/ECOM90025/main/Data/test_data.csv')
 test_ID = test_df['ID']
@@ -444,14 +463,18 @@ for term in selected_terms:
         base = term.replace('_op3', '')
         if base in X_test_processed.columns and base in op_params:
             X_test_processed[term] = _transform_op3(X_test_processed[base], op_params[base])
-    elif term.endswith('_pos'):
-        base = term.replace('_pos', '')
-        if base in X_test_processed.columns:
-            X_test_processed[term] = hinge_pos(X_test_processed[base])
-    elif term.endswith('_neg'):
-        base = term.replace('_neg', '')
-        if base in X_test_processed.columns:
-            X_test_processed[term] = hinge_neg(X_test_processed[base])
+    elif term.endswith('_pos') or term.endswith('_neg'):
+        # handle both raw and interaction hinge terms
+        is_pos = term.endswith('_pos')
+        base = term[:-4]  # strip _pos/_neg
+        if '*' in base:
+            f1, f2 = base.split('*')
+            if f1 in X_test_processed.columns and f2 in X_test_processed.columns:
+                inter = X_test_processed[f1] * X_test_processed[f2]
+                X_test_processed[term] = hinge_pos(inter) if is_pos else hinge_neg(inter)
+        else:
+            if base in X_test_processed.columns:
+                X_test_processed[term] = hinge_pos(X_test_processed[base]) if is_pos else hinge_neg(X_test_processed[base])
     elif '*' in term:
         f1, f2 = term.split('*')
         if f1 in X_test_processed.columns and f2 in X_test_processed.columns:
